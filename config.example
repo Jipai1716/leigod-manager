@@ -1,0 +1,31 @@
+# 雷神管理器配置示例（青龙「环境变量」里照此填写）
+# 说明：本文件只是备忘，不会被执行。青龙里 Name/Value 逐条填即可。
+
+# ---- 必填：雷神 Token 存放位置 ----
+# 变量名，实际 Token 由 /l u <Token> 写入该变量
+LEIGOD_TOKEN_ENV=LEIGOD_TOKEN
+
+# ---- 必填：青龙 OpenAPI 凭据（用于读写上面的环境变量）----
+# 青龙后台 → 系统设置 → 应用设置 → 新建应用，或复用 system 应用
+LEIGOD_QL_BASE_URL=http://127.0.0.1:5700
+LEIGOD_QL_CLIENT_ID=nscTDZhZs5-6
+LEIGOD_QL_CLIENT_SECRET=<在青龙应用里查看>
+
+# ---- 必填：QQ 指令权限与推送 ----
+# 允许执行 /leigod /l 的 QQ 用户 openid，逗号分隔；为空表示不限制（不推荐）
+LEIGOD_ALLOWED_IDS=<你的 openid>
+# 日报推送目标；留空则回落到已有的 QQ_OPENID
+LEIGOD_QQ_TARGET=
+# 也可直接复用已有变量，无需重复配置：
+#   QQ_APP_ID / QQ_APP_SECRET / QQ_OPENID
+
+# ---- 可选：时间与存储 ----
+LEIGOD_TZ=Asia/Shanghai
+LEIGOD_DAILY_TIME=23:59
+LEIGOD_STATE_DIR=/ql/data/scripts/leigod/state
+LEIGOD_HISTORY_LIMIT=2000
+LEIGOD_HTTP_TIMEOUT=20
+
+# ---- 可选：跨容器事件日志（自动创建，勿手改）----
+LEIGOD_CMDLOG_ENV=LEIGOD_CMDLOG
+LEIGOD_PAUSE_STATE_ENV=LEIGOD_PAUSE_STATE

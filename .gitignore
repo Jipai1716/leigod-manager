@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 本地配置与状态（含密钥 / Token，绝不提交）
+config.json
+astrbot_plugin_leigod_manager/config.json
+astrbot_plugin_leigod_manager/state/
+state/
+logs/
+*.log
+
+# 部署产物
+*.tgz
+deploy.local.sh
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store

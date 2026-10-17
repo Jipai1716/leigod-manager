@@ -3,20 +3,20 @@
 """雷神加速器 Token 管理与定时暂停系统 —— 公共库（仅标准库依赖）。
 
 被三处复用：
-  1. 青龙定时任务（leigod_pause.py / leigod_daily_report.py）
-  2. AstrBot 插件（astrbot_plugin_leigod_manager）
+  1. 青龙定时任务（leigod_pause.py）
+  2. Web 面板（panel/app.py）
   3. 命令行手工调试
 
 一个实现，多处调用 —— 暂停逻辑只写一遍。
 
-证据来源（见 docs/env-survey.md）：
-  - 雷神官网前端 bundle vip.leigod.com/js/chunk-common.js / user.js
+证据来源（见 docs/api-notes.md）：
+  - 雷神官网前端 bundle /js/chunk-common.js / user.js
     · URL_USER_INFO   = /api/user/info
     · URL_USER_PAUSE  = /api/user/pause
     · URL_USER_RECOVER= /api/user/recover
     · URL_USER_PAUSELOG = /api/user/pause/lists
     · sign() 算法与硬编码 key
-  - 现有 weather_jinan.py（QQ 机器人 OpenAPI 推送范式）
+  - QQ 机器人 OpenAPI 推送范式
 """
 
 from __future__ import annotations
@@ -566,7 +566,7 @@ OPS = {
 class Store:
     """事件日志。
 
-    AstrBot 容器与青龙容器没有共享挂载，唯一共同可写的位置是青龙环境变量。
+    面板容器与青龙容器没有共享挂载，唯一共同可写的位置是青龙环境变量。
     因此事件记录以 LEIGOD_CMDLOG（JSON 数组，最多 100 条）为准，本地
     state/history.jsonl 只作离线镜像与排查用，不会被日报重复统计。
     """

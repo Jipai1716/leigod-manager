@@ -1,53 +1,56 @@
 # 实现与运维说明
 
-> 架构已从「QQ 固定指令」改为「Docker Web 面板」，理由见 §9。
+面向维护者：代码怎么组织、关键决策为什么这么做、出问题从哪查。
+接口细节见 [`api-notes.md`](api-notes.md)。
 
 ## 1. 代码结构
 
 | 文件 | 职责 |
 |---|---|
-| `scripts/leigod_common.py` | 公共库：配置、雷神客户端、青龙客户端、QQ 推送、事件存储、业务动作 |
-| `scripts/leigod_pause.py` | 青龙任务 14 的入口，**仅失败/未知时推 QQ** |
-| `scripts/leigod_{update_token,logs,status,history}.py` | 命令行工具（面板不可用时手工排查） |
-| `panel/app.py` | Web 面板（标准库 http.server + 内嵌前端） |
+| `scripts/leigod_common.py` | 公共库：配置、雷神客户端、青龙客户端、QQ 推送、事件存储、cron 工具 |
+| `scripts/leigod_pause.py` | 青龙定时任务入口，**仅失败/未知时推 QQ** |
+| `scripts/leigod_{update_token,logs,status,history}.py` | 命令行工具，面板不可用时手工排查 |
+| `panel/app.py` | Web 面板（标准库 `http.server` + 内嵌前端） |
 | `panel/Dockerfile` | `python:3.11-slim`，无 pip 依赖 |
-| `via/leigod-token.user.js` | Via 用户脚本 |
+| `tampermonkey/`、`via/` | 浏览器取 Token 脚本 |
 
 ## 2. 面板实现要点
 
-- **无第三方依赖**：`http.server.ThreadingHTTPServer` + 内嵌 HTML/JS，镜像里只有 `app.py` 和 `leigod_common.py`。
-- **无鉴权**：按需求去掉访问密码，仅限局域网；`/api/*` 直接可用。
-- **无状态**：Token、事件、暂停结果、定时规则全部通过青龙 OpenAPI 读写，容器不挂卷，删了重建不丢数据。
-- **健康检查**：`GET /healthz` 返回 200，Dockerfile 与 compose 都配了 HEALTHCHECK。
+- **零依赖**：只用标准库，镜像里仅 `app.py` + `leigod_common.py`。
+- **无鉴权**：按需求去掉访问密码，仅限内网；`/api/*` 直接可用。
+- **无状态**：Token、事件、暂停结果、定时规则全部经青龙 OpenAPI 读写，容器可随时重建。
+- **健康检查**：`GET /healthz` 返回 200，Dockerfile 与 compose 均配置 HEALTHCHECK。
 
-接口：
+### 2.1 接口
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/summary` | 概览：Token 状态、**实时暂停状态**、定时规则、最近事件、错误 |
-| POST | `/api/token` | `{token}` → 写入青龙 `LEIGOD_TOKEN`，不验证有效性 |
-| POST | `/api/pause` | 立即暂停；失败时顺带推 QQ |
+| GET | `/api/summary` | Token 状态、实时暂停状态、定时规则、最近事件、错误 |
+| POST | `/api/token` | 写青龙 Token 变量，不验证有效性 |
+| POST | `/api/pause` | 立即暂停；失败时推 QQ |
 | GET | `/api/logs?n=3` | 官网最近 N 条暂停记录 |
 | GET | `/api/schedule` | 当前 cron + 中文描述 + 预设 |
-| POST | `/api/schedule` | `{cron}` → 改青龙任务 cron，**保存后回读校验** |
-| GET | `/api/history?n=20` | 本地事件记录 |
+| POST | `/api/schedule` | 改青龙任务 cron，保存后回读校验 |
+| GET | `/api/history?n=20` | 事件记录 |
 | GET | `/healthz` | 健康检查 |
 
-### 2.1 暂停状态怎么来的
+### 2.2 暂停状态怎么得到
 
-`/api/user/info` 的 `pause_status_id`：`1` → 已暂停，`0` → 未暂停，其它 → 未知。
-面板每次都实时问官网，不吃缓存、不做推断；Token 缺失或接口报错时明确显示「未知 + 原因」。
+每次请求 `/api/user/info`，读 `pause_status_id`：`1` → 已暂停，`0` → 未暂停，其它 → 未知。
+不缓存、不推断；Token 缺失或接口报错时显示「未知 + 原因」，而不是猜一个状态。
 
-### 2.2 定时规则怎么改的
+### 2.3 定时规则怎么改
 
-`PUT /open/crons` 需要 `{...commonCronSchema, id}` 的**单个对象**（不是数组）。
-实现先按完整字段提交，若被 Joi 校验拒绝则退回到 `{id, name, command, schedule}` 最小集；
-保存后立刻 `GET /open/crons` 回读比对，不一致就报错。
+`PUT /open/crons` 需要 `{...commonCronSchema, id}` 的**单个对象**。
 
-本地先做一层校验：5 段、字符白名单、各字段数值范围（分 0-59、时 0-23、日 1-31、月 1-12、周 0-7），
-拒绝 `?`（Quartz 语法，node-schedule 不认）。青龙服务端还会用 cron-parser 再校验一次。
+实现策略：
 
-预设（`cron_presets()`）：
+1. 本地校验：5 段、字符白名单、各字段范围（分 0-59、时 0-23、日 1-31、月 1-12、周 0-7），拒绝 `?`
+2. 取目标任务完整对象，替换 `schedule` 后 PUT；
+   若被 Joi 拒绝（未知字段等），退回 `{id, name, command, schedule}` 最小集重试
+3. 保存后立刻 GET 回读，与目标 cron 比对，不一致就报错——**不把「请求成功」当「保存成功」**
+
+预设见 `cron_presets()`：
 
 | 预设 | cron |
 |---|---|
@@ -61,103 +64,118 @@
 ## 3. 部署
 
 ```bash
-tar -czf leigod.tgz -C leigod-manager panel scripts
-scp leigod.tgz jipai@<NAS>:/tmp/
-ssh jipai@<NAS> 'mkdir -p /tmp/leigod-deploy2 && tar -xzf /tmp/leigod.tgz -C /tmp/leigod-deploy2'
-ssh jipai@<NAS> 'NAS_SUDO_PW=... bash /tmp/deploy_panel.sh'   # 构建 + 启动
+docker build -t leigod-panel:1.1.0 -f panel/Dockerfile .
+docker run -d --name leigod-panel --restart unless-stopped -p 5788:5788 \
+  -e LEIGOD_QL_BASE_URL=http://<qinglong>:5700 \
+  -e LEIGOD_QL_CLIENT_ID=<id> \
+  -e LEIGOD_QL_CLIENT_SECRET=<secret> \
+  leigod-panel:1.1.0
 ```
 
-`deploy_panel.sh` 首次运行会生成 `panel.env`（600），其中 `LEIGOD_QL_BASE_URL` 由脚本自动探测
-宿主局域网 IP（排除 `172.x` 容器网段）。重复运行会复用该文件。
+`tools/deploy_panel.sh` 是一个可直接复用的参考实现：自动探测宿主局域网 IP
+（排除 `172.x` 容器网段）生成 `panel.env`（600）、构建镜像、启动容器并做健康检查。
 
-```text
-LEIGOD_QL_BASE_URL=http://<NAS_IP>:5700
-LEIGOD_QL_CLIENT_ID=...
-LEIGOD_QL_CLIENT_SECRET=...
-LEIGOD_TZ=Asia/Shanghai
-LEIGOD_PAUSE_TASK_NAME=雷神定时暂停
-```
+青龙侧脚本放到 `/ql/data/scripts/leigod/`，定时任务命令写 `task leigod/leigod_pause.py`——
+用 `task` 而不是裸 `python3`，因为前者会注入面板里的环境变量。
 
-更新代码后重跑 `deploy_panel.sh` 即可（重建镜像并重启容器）。
+## 4. 青龙侧准备
 
-## 4. 青龙侧准备（已执行，重装参考）
+1. 新建 API 应用，勾选 `envs`、`crons`，记下 `client_id` / `client_secret`。
+2. 需要的环境变量（面板只需要读青龙地址与凭据，Token 由面板写入）：
 
-1. `system` 应用补 `envs` scope —— `Apps` 表 + `keyv.sqlite` 的 `keyv:apps` 缓存都要改，
-   否则永久 401（`tools/fix_scope.sh`、`tools/fix_keyv.sh`）。
-2. 配置变量：`LEIGOD_QL_BASE_URL`、`LEIGOD_QL_CLIENT_ID`、`LEIGOD_QL_CLIENT_SECRET`、`LEIGOD_TZ`。
-3. 建定时任务 `雷神定时暂停`（`tools/create_crons.sh`）。
-4. 青龙侧脚本部署到 `/vol1/1000/Docker/qinglong/scripts/leigod`（`tools/deploy.sh`）。
+   | 变量 | 用途 |
+   |---|---|
+   | `LEIGOD_TOKEN` | Token 存放处，面板首次写入时自动创建 |
+   | `LEIGOD_CMDLOG` | 事件记录（JSON 数组，上限 100 条） |
+   | `LEIGOD_PAUSE_STATE` | 最近一次暂停结果 |
+   | `QQ_APP_ID` / `QQ_APP_SECRET` / `QQ_OPENID` | 失败报警 |
+
+3. 定时任务：`雷神定时暂停` → `task leigod/leigod_pause.py`，cron 由面板管理。
+
+> 若应用 scope 改过却不生效：`Apps` 表与 `keyv.sqlite` 的 `keyv:apps` 缓存是两份数据，
+> 都要更新（或重启青龙让缓存重建），否则一直 401。
 
 ## 5. 状态与事件模型
 
-- Token：青龙环境变量 `LEIGOD_TOKEN`（面板写入）。
-- 事件：`LEIGOD_CMDLOG`（JSON 数组，最多 100 条），面板与青龙任务共用。
-- 暂停结果：`LEIGOD_PAUSE_STATE`。
+- **Token**：青龙环境变量（默认 `LEIGOD_TOKEN`）
+- **事件**：`LEIGOD_CMDLOG`，JSON 数组，最多 100 条
+- **暂停结果**：`LEIGOD_PAUSE_STATE`
 
-`op` 取值：`token_update` / `pause_trigger` / `pause_result` / `logs_query` / `error`。
+事件字段：
+
+```json
+{"ts": 1792..., "time": "2026-10-17 23:31:16", "op": "pause_result",
+ "op_label": "暂停任务结果", "result": "失败", "detail": "..."}
+```
+
+`op`：`token_update` / `pause_trigger` / `pause_result` / `logs_query` / `error`。
+
+为什么把事件放环境变量：多个容器之间没有共享挂载，青龙环境变量是唯一既公共又可写的位置。
+代价是不适合高并发写入，单人低频使用足够。
 
 ## 6. 测试记录
 
-面板 v1.1（无密码版），`tools/test_panel_v11.py`，11/11 通过：
+面板 v1.1 回归（`tools/test_panel_v11.py`，在容器内跑）11/11 通过：
 
-| 测试 | 结果 |
+| 用例 | 结果 |
 |---|---|
-| 无登录直接访问 `/api/summary` | 200 |
-| 实时暂停状态 | `state=paused, pause_status_id=1`（账号当时确实处于暂停） |
-| 读取当前 cron | `0 */6 * * *`，描述「整点，每 6 小时，每天」 |
-| 非法 cron（`0 99 * * *`） | 被青龙 400 拒绝，未落库 |
-| 段数不足 / 含 `?` | 本地拦截并给出原因 |
-| 保存工作日规则 `0 3 * * 1-5` | 成功，回读一致，描述「整点，在 03:00，仅工作日」 |
+| 无登录访问 `/api/summary` | 200 |
+| 实时暂停状态 | 返回 `state` + `pause_status_id`，与官网一致 |
+| 读取当前 cron | 返回表达式与中文描述 |
+| 非法 cron `0 99 * * *` | 本地拦截「时字段超出范围 0-23」 |
+| 段数不足 / 含 `?` | 本地拦截并说明原因 |
+| 保存工作日规则 `0 3 * * 1-5` | 成功，回读一致 |
 | 恢复默认规则 | 成功 |
-| 官网时长日志 | **真实返回 3 条**：`暂停时间：2026-10-17 23:12:38` 等 |
-| 历史记录 | 返回 5 条 |
+| 官网时长日志 | 真实返回记录（暂停时间/恢复时间/状态码） |
+| 历史记录 | 返回记录列表 |
 
-早前已验证：写 Token（含「有效期未执行」声明）、空 Token 拒绝、假 Token 查询返回官网
-真实错误码 `400006`（不伪造数据）、容器 HEALTHCHECK 通过。
+其他已验证项：
 
-未覆盖：真实 Token 下的「暂停动作」端到端（账号当前已处于暂停态，接口会走「已暂停不重复调用」分支）；
-QQ 失败报警的真实推送。
+- 写 Token 返回「写入结果：成功 / 有效性验证：未执行」；空 Token 被拒
+- 用无效 Token 查询时，官网返回 `400006`，面板原样报错，不伪造数据
+- 容器 HEALTHCHECK 通过（`/healthz` 200）
+
+未覆盖：账号处于未暂停状态时的真实暂停动作、QQ 失败报警的真实投递。
 
 ## 7. 回滚
 
 ```bash
-# 停面板
-sudo docker rm -f leigod-panel
-sudo rm -rf /vol1/1000/Docker/leigod-panel
-
-# 删定时任务 14（青龙后台或 DELETE /open/crons body [14]）
-# 删青龙侧脚本
-sudo rm -rf /vol1/1000/Docker/qinglong/scripts/leigod
-# 删新增环境变量 LEIGOD_*
+docker rm -f leigod-panel
+rm -rf <配置目录>            # panel.env 等
+rm -rf /ql/data/scripts/leigod
+# 青龙后台删除定时任务「雷神定时暂停」，并清理新增的 LEIGOD_* 环境变量
 ```
 
-原有 5 个任务与 `QQ_APP_ID` 等变量不受影响。
+面板完全独立，删除不影响青龙上的其它任务。
 
-## 8. 排错
+## 8. 排错顺序
 
-| 现象 | 检查 |
-|---|---|
-| 面板打不开 | `docker ps \| grep leigod-panel`；`docker logs leigod-panel`；端口 5788 是否被占 |
-| 暂停状态显示「未知」 | 看卡片里的原因：未配置 Token / Token 被拒（400006）/ 网络失败 |
-| 概览报「青龙接口请求失败」 | `LEIGOD_QL_BASE_URL` 必须是容器能访问的局域网 IP，不能写 127.0.0.1 |
-| 改 cron 报 400 | 青龙用 cron-parser 校验；检查段数、范围、是否含 `?` |
-| 改 cron 提示「复核不一致」 | 任务名对不上（`LEIGOD_PAUSE_TASK_NAME`）或任务被改名 |
-| 写 Token 报 401 Access denied | 青龙应用缺 `envs` scope（见 §4.1）；改 cron 还需要 `crons` scope |
-| 查日志报 400006 | Token 过期，重新提取后在面板更新 |
-| 暂停一直「未知」 | 调接口后复查 `pause_status_id` 仍不是 1；看 `LEIGOD_PAUSE_STATE` 的 detail |
-| 没收到失败报警 | 青龙 `QQ_APP_ID/SECRET/OPENID` 是否有效；任务日志里看「QQ 推送失败」 |
+1. `docker logs leigod-panel` 看启动与请求日志
+2. 面板概览里「最近错误」一行
+3. `docker exec leigod-panel python3 -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:5788/api/summary').read()[:400])"`
+4. 青龙侧：任务日志、`LEIGOD_PAUSE_STATE` 的 detail
+5. 官网接口：直接 POST `/api/user/info` 看 `code`（`400006` = Token 失效）
 
-## 9. 为什么放弃 QQ 指令方案
+## 9. 设计取舍
 
-最初按「QQ 私聊发 `/l u <Token>`」实现，AstrBot 插件写好也加载成功了，但实测发现：
+### 9.1 为什么不做 QQ 指令入口
 
-1. AstrBot 三个平台适配器默认全部 `enable: false`，从未接收过任何消息；
-2. 启用 `qq_official` 后报 `100016 invalid appid or secret`（存的 secret 是旧的）；
-3. `platform_settings.id_whitelist` 为空且白名单开关开启，会拦截所有人。
+最初实现过「QQ 私聊发指令 → 机器人插件 → 执行」，实际跑下来发现入站链路有三处容易踩：
 
-三层修完后链路能通，但**入站依赖 AstrBot 的运行状态**，而 AstrBot 平时还在跑 LLM 插件，
-任何一次配置变更或重启都可能把指令入口带挂。权衡后改为 Web 面板：入口只依赖一个
-几十 MB 的自包含容器，失败面小得多，也顺手去掉了日报推送（按需求只保留失败报警）。
+1. 消息框架的平台适配器常见默认关闭，插件加载成功也收不到消息；
+2. 适配器里存的 AppSecret 可能是旧值，报 `100016 invalid appid or secret`；
+3. 框架自身的 ID 白名单为空且开关打开时，会静默拦掉所有人。
 
-相关废弃代码已删除，排查过程保留在 `tools/revert_astrbot.py`、
-`tools/cleanup_cmd_system.sh` 里。
+即使修通，入口也依赖一个跑着其它重型插件的容器，任何配置变更或重启都可能带挂。
+权衡后改为 Web 面板：入口只依赖一个几十 MB 的自包含容器，失败面小，且顺带满足
+「只在失败时报警」的需求（不需要日报推送）。
+
+### 9.2 为什么事件不落文件
+
+青龙与面板是两个容器，无共享挂载。让它们都能读写的只有青龙环境变量。
+如果以后允许改挂载，可以换成共享目录 + JSONL，吞吐会好很多。
+
+### 9.3 为什么不用 requests
+
+青龙镜像与 `python:3.11-slim` 都能装 `requests`，但标准库 `urllib` 足够，
+少一个依赖就少一处镜像变大与版本冲突的可能。

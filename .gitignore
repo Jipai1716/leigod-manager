@@ -5,8 +5,6 @@ __pycache__/
 
 # 本地配置与状态（含密钥 / Token，绝不提交）
 config.json
-astrbot_plugin_leigod_manager/config.json
-astrbot_plugin_leigod_manager/state/
 state/
 logs/
 *.log

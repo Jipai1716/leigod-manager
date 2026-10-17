@@ -106,7 +106,7 @@
   function panelUrl() {
     var v = (typeof GM_getValue === 'function' ? GM_getValue('panelUrl', '') : '') || '';
     if (!v) {
-      v = window.prompt('第一次使用：填写管理器面板地址\n例如 http://192.168.1.10:5788', 'http://');
+      v = window.prompt('第一次使用：填写管理器面板地址\n例如 http://<主机IP>:5788', 'http://');
       if (!v || v.indexOf('http') !== 0) return '';
       v = v.replace(/\/+$/, '');
       if (typeof GM_setValue === 'function') GM_setValue('panelUrl', v);

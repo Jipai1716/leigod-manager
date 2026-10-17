@@ -154,3 +154,52 @@ sudo rm -rf /vol1/1000/Docker/qinglong/scripts/leigod
 - `config.json` 与 `LEIGOD_QL_CLIENT_SECRET` 是敏感项，权限 600，**不要提交到 git**（`.gitignore` 已排除）。
 - Token 只存青龙环境变量 `LEIGOD_TOKEN`，不进日志、不进事件记录、不在回复里回显。
 - 指令入口只做白名单校验，不提供任意 shell 执行。
+
+## 10. 入站链路踩坑记录（首次上线时全部踩到）
+
+指令「没反应」时，按这个顺序排查，前三条与插件代码无关：
+
+### 10.1 AstrBot 三个平台适配器默认全是禁用
+
+```json
+// /AstrBot/data/cmd_config.json
+"platform": [
+  {"id": "Kana", "type": "aiocqhttp", "enable": false},
+  {"id": "Aki",  "type": "aiocqhttp", "enable": false},
+  {"id": "Hex",  "type": "qq_official", "enable": false}   // ← 要用的这个
+]
+```
+
+`enable: false` 时 AstrBot 根本没和 QQ 建立连接，消息不会到达任何插件。
+处理：启用 `Hex`（官方 Bot，appid 与青龙 `QQ_APP_ID` 一致），重启 AstrBot。
+**不要**为此重启 NapCat —— 那两个 aiocqhttp 容器已停两个月，本项目不需要它们。
+
+### 10.2 启用后报 `100016 invalid appid or secret`
+
+说明 `Hex.secret` 是旧的。用青龙里正在生效的 `QQ_APP_SECRET` 覆盖即可
+（`tools/patch_qq_secret.py`）。注意两者长度可能相同，所以别靠长度判断。
+
+### 10.3 AstrBot 自身白名单为空会拦截全部消息
+
+`platform_settings.enable_id_white_list: true` + `id_whitelist: []` → 谁都不放行。
+把接收者的 openid 加进 `id_whitelist`（`tools/enable_qq_official.py` 已包含）。
+这和插件自己的 `LEIGOD_ALLOWED_IDS` 是两层独立校验，都要过。
+
+### 10.4 验证连接
+
+```bash
+docker logs --since 5m astrbot | grep -a "QQOfficial"
+# 正常：[QQOfficial] Websocket session starting. 且之后没有 100016
+```
+
+### 10.5 插件行为确认
+
+```bash
+docker logs --since 5m astrbot | grep -a leigod
+# 正常：Plugin astrbot_plugin_leigod_manager (1.0.0) by Jipai
+#       [leigod] 指令入口已就绪（/leigod 或 /l）
+```
+
+命令匹配用的是 `@filter.regex(r"^\s*/(?:leigod|l)(?:\s|$)")`，AstrBot 的实现是
+`regex.search(message.strip())` 且**不受 wake_prefix 约束**，所以裸 `/l h` 即可触发。
+

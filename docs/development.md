@@ -16,21 +16,47 @@
 ## 2. 面板实现要点
 
 - **无第三方依赖**：`http.server.ThreadingHTTPServer` + 内嵌 HTML/JS，镜像里只有 `app.py` 和 `leigod_common.py`。
-- **鉴权**：密码登录，Cookie 为 `HMAC-SHA256(password, ts)`，有效期 7 天；`/api/*` 未登录返回 401 JSON。
-- **无状态**：Token、事件、暂停结果全部通过青龙 OpenAPI 读写，容器不挂卷，删了重建不丢数据。
+- **无鉴权**：按需求去掉访问密码，仅限局域网；`/api/*` 直接可用。
+- **无状态**：Token、事件、暂停结果、定时规则全部通过青龙 OpenAPI 读写，容器不挂卷，删了重建不丢数据。
 - **健康检查**：`GET /healthz` 返回 200，Dockerfile 与 compose 都配了 HEALTHCHECK。
 
 接口：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/login` | `{password}` → 设 Cookie |
-| GET | `/api/summary` | 概览（Token 状态、最近暂停、最近日志、错误） |
+| GET | `/api/summary` | 概览：Token 状态、**实时暂停状态**、定时规则、最近事件、错误 |
 | POST | `/api/token` | `{token}` → 写入青龙 `LEIGOD_TOKEN`，不验证有效性 |
 | POST | `/api/pause` | 立即暂停；失败时顺带推 QQ |
-| GET | `/api/logs?n=3` | 官网最近 N 条时长日志 |
+| GET | `/api/logs?n=3` | 官网最近 N 条暂停记录 |
+| GET | `/api/schedule` | 当前 cron + 中文描述 + 预设 |
+| POST | `/api/schedule` | `{cron}` → 改青龙任务 cron，**保存后回读校验** |
 | GET | `/api/history?n=20` | 本地事件记录 |
 | GET | `/healthz` | 健康检查 |
+
+### 2.1 暂停状态怎么来的
+
+`/api/user/info` 的 `pause_status_id`：`1` → 已暂停，`0` → 未暂停，其它 → 未知。
+面板每次都实时问官网，不吃缓存、不做推断；Token 缺失或接口报错时明确显示「未知 + 原因」。
+
+### 2.2 定时规则怎么改的
+
+`PUT /open/crons` 需要 `{...commonCronSchema, id}` 的**单个对象**（不是数组）。
+实现先按完整字段提交，若被 Joi 校验拒绝则退回到 `{id, name, command, schedule}` 最小集；
+保存后立刻 `GET /open/crons` 回读比对，不一致就报错。
+
+本地先做一层校验：5 段、字符白名单、各字段数值范围（分 0-59、时 0-23、日 1-31、月 1-12、周 0-7），
+拒绝 `?`（Quartz 语法，node-schedule 不认）。青龙服务端还会用 cron-parser 再校验一次。
+
+预设（`cron_presets()`）：
+
+| 预设 | cron |
+|---|---|
+| 每 6 小时 | `0 */6 * * *` |
+| 每天 03:00 | `0 3 * * *` |
+| 工作日 03:00 | `0 3 * * 1-5` |
+| 休息日 03:00 | `0 3 * * 6,0` |
+| 工作日 00:00 与 12:00 | `0 0,12 * * 1-5` |
+| 每 2 小时 | `0 */2 * * *` |
 
 ## 3. 部署
 
@@ -41,10 +67,18 @@ ssh jipai@<NAS> 'mkdir -p /tmp/leigod-deploy2 && tar -xzf /tmp/leigod.tgz -C /tm
 ssh jipai@<NAS> 'NAS_SUDO_PW=... bash /tmp/deploy_panel.sh'   # 构建 + 启动
 ```
 
-`deploy_panel.sh` 首次运行会生成密码（输出 `PINNED_PASSWORD:...`），写入
-`/vol1/1000/Docker/leigod-panel/panel.env`（600）。重复运行会复用该文件。
+`deploy_panel.sh` 首次运行会生成 `panel.env`（600），其中 `LEIGOD_QL_BASE_URL` 由脚本自动探测
+宿主局域网 IP（排除 `172.x` 容器网段）。重复运行会复用该文件。
 
-更新代码后重跑 `deploy_panel.sh` 即可（会重建镜像并重启容器）。
+```text
+LEIGOD_QL_BASE_URL=http://<NAS_IP>:5700
+LEIGOD_QL_CLIENT_ID=...
+LEIGOD_QL_CLIENT_SECRET=...
+LEIGOD_TZ=Asia/Shanghai
+LEIGOD_PAUSE_TASK_NAME=雷神定时暂停
+```
+
+更新代码后重跑 `deploy_panel.sh` 即可（重建镜像并重启容器）。
 
 ## 4. 青龙侧准备（已执行，重装参考）
 
@@ -64,22 +98,25 @@ ssh jipai@<NAS> 'NAS_SUDO_PW=... bash /tmp/deploy_panel.sh'   # 构建 + 启动
 
 ## 6. 测试记录
 
-| 测试 | 方式 | 结果 |
-|---|---|---|
-| 未登录访问 API | `GET /api/summary` 无 Cookie | 401 |
-| 错误密码 | `POST /api/login` | 401 |
-| 正确密码登录 | 读 `panel.env` 密码 | 200 + `lg_sid` Cookie |
-| 写入 Token | `POST /api/token` | 成功，回复含「有效性验证：未执行」 |
-| 概览状态同步 | `GET /api/summary` | 已配置、长度正确 |
-| 空 Token | `POST /api/token` `"   "` | 拒绝 |
-| 假 Token 查日志 | `GET /api/logs` | 官网真实返回 `400006`，面板原样报错不伪造 |
-| 历史记录 | `GET /api/history` | 返回 3 条 |
-| 页面渲染 | `GET /` | 200，6898 字节 |
-| 未配置 Token 时暂停 | `task leigod/leigod_pause.py --no-push` | 退出码 2，提示先配置 Token |
-| **真实 Token 下的暂停与日志** | 需要有效 Token | **未测** |
-| **QQ 失败报警** | 需要一次真实失败 | **未测**（逻辑已接好） |
+面板 v1.1（无密码版），`tools/test_panel_v11.py`，11/11 通过：
 
-一键回归：`tools/test_panel_api.py`（在容器内跑，需 `LEIGOD_PANEL_PASSWORD`）。
+| 测试 | 结果 |
+|---|---|
+| 无登录直接访问 `/api/summary` | 200 |
+| 实时暂停状态 | `state=paused, pause_status_id=1`（账号当时确实处于暂停） |
+| 读取当前 cron | `0 */6 * * *`，描述「整点，每 6 小时，每天」 |
+| 非法 cron（`0 99 * * *`） | 被青龙 400 拒绝，未落库 |
+| 段数不足 / 含 `?` | 本地拦截并给出原因 |
+| 保存工作日规则 `0 3 * * 1-5` | 成功，回读一致，描述「整点，在 03:00，仅工作日」 |
+| 恢复默认规则 | 成功 |
+| 官网时长日志 | **真实返回 3 条**：`暂停时间：2026-10-17 23:12:38` 等 |
+| 历史记录 | 返回 5 条 |
+
+早前已验证：写 Token（含「有效期未执行」声明）、空 Token 拒绝、假 Token 查询返回官网
+真实错误码 `400006`（不伪造数据）、容器 HEALTHCHECK 通过。
+
+未覆盖：真实 Token 下的「暂停动作」端到端（账号当前已处于暂停态，接口会走「已暂停不重复调用」分支）；
+QQ 失败报警的真实推送。
 
 ## 7. 回滚
 
@@ -101,9 +138,11 @@ sudo rm -rf /vol1/1000/Docker/qinglong/scripts/leigod
 | 现象 | 检查 |
 |---|---|
 | 面板打不开 | `docker ps \| grep leigod-panel`；`docker logs leigod-panel`；端口 5788 是否被占 |
-| 登录一直失败 | `panel.env` 里的 `LEIGOD_PANEL_PASSWORD` 是否与输入一致（改完要重启容器） |
+| 暂停状态显示「未知」 | 看卡片里的原因：未配置 Token / Token 被拒（400006）/ 网络失败 |
 | 概览报「青龙接口请求失败」 | `LEIGOD_QL_BASE_URL` 必须是容器能访问的局域网 IP，不能写 127.0.0.1 |
-| 写 Token 报 401 Access denied | 青龙应用缺 `envs` scope（见 §4.1） |
+| 改 cron 报 400 | 青龙用 cron-parser 校验；检查段数、范围、是否含 `?` |
+| 改 cron 提示「复核不一致」 | 任务名对不上（`LEIGOD_PAUSE_TASK_NAME`）或任务被改名 |
+| 写 Token 报 401 Access denied | 青龙应用缺 `envs` scope（见 §4.1）；改 cron 还需要 `crons` scope |
 | 查日志报 400006 | Token 过期，重新提取后在面板更新 |
 | 暂停一直「未知」 | 调接口后复查 `pause_status_id` 仍不是 1；看 `LEIGOD_PAUSE_STATE` 的 detail |
 | 没收到失败报警 | 青龙 `QQ_APP_ID/SECRET/OPENID` 是否有效；任务日志里看「QQ 推送失败」 |

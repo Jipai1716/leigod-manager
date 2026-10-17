@@ -266,20 +266,21 @@ def format_pause_logs(cfg: Config, rows: list[dict], note: str = "") -> str:
 
 
 def _humanize_record(cfg: Config, row: dict) -> str:
-    """只展示响应里真实存在且含义明确的字段，不推算。"""
+    """按 /api/user/pause/lists 的真实字段展示（实测字段：id/status/pause_time/resume_time/op_source）。"""
     parts = []
-    for key, label in (
-        ("pause_time", "暂停时间"),
-        ("start_time", "开始时间"),
-        ("end_time", "结束时间"),
-        ("create_time", "记录时间"),
-        ("time", "时间"),
-    ):
-        value = row.get(key)
-        if value in (None, "", 0, "0"):
-            continue
-        parts.append(f"{label}：{_fmt_timeish(cfg, value)}")
-        break
+
+    pause_time = row.get("pause_time")
+    if pause_time:
+        parts.append(f"暂停时间：{_fmt_timeish(cfg, pause_time)}")
+
+    if "resume_time" in row:
+        resume_time = row.get("resume_time")
+        parts.append(f"恢复时间：{_fmt_timeish(cfg, resume_time)}" if resume_time else "恢复时间：未恢复")
+
+    if "status" in row:
+        parts.append(f"状态码：{row.get('status')}")
+
+    # 若官网以后加了其它字段，只展示含义明确的这几个
     for key, label in (
         ("pause_duration", "暂停时长"),
         ("duration", "时长"),
@@ -297,6 +298,7 @@ def _humanize_record(cfg: Config, row: dict) -> str:
             parts.append(f"{label}：{_fmt_duration(value)}")
         else:
             parts.append(f"{label}：{value}")
+
     if not parts:
         # 完全未知的结构：原样展示短 JSON，方便排查，但不编造
         text = json.dumps(row, ensure_ascii=False)
@@ -434,6 +436,57 @@ class QinglongClient:
             return "created"
         self.update_env(env.get("id"), name, value, remarks or (env.get("remarks") or ""))
         return "updated"
+
+    # ---- 定时任务 ----
+    CRON_KEYS = (
+        "name",
+        "command",
+        "schedule",
+        "task_before",
+        "task_after",
+        "log_name",
+        "allow_multiple_instances",
+        "work_dir",
+        "extra_schedules",
+        "sub_id",
+    )
+
+    def list_crons(self) -> list[dict]:
+        data = self._call("GET", "/open/crons")
+        payload = data.get("data") or {}
+        return payload.get("data") or []
+
+    def find_cron(self, name: str) -> dict | None:
+        for cron in self.list_crons():
+            if cron.get("name") == name:
+                return cron
+        return None
+
+    def update_cron_schedule(self, cron_id: int, schedule: str) -> dict:
+        """改某个任务的 cron。先按完整字段提交，被校验拒绝则退回最小字段。"""
+        target = next((c for c in self.list_crons() if c.get("id") == cron_id), None)
+        if target is None:
+            raise QinglongError(f"任务 {cron_id} 不存在")
+
+        full = {k: target.get(k) for k in self.CRON_KEYS if k in target}
+        full.update({"id": cron_id, "schedule": schedule})
+        try:
+            response = self._call("PUT", "/open/crons", full)
+            if response.get("code") == 200:
+                return response.get("data") or {}
+        except QinglongError:
+            pass
+
+        minimal = {
+            "id": cron_id,
+            "name": target.get("name"),
+            "command": target.get("command"),
+            "schedule": schedule,
+        }
+        response = self._call("PUT", "/open/crons", minimal)
+        if response.get("code") != 200:
+            raise QinglongError(f"更新定时规则失败: {response.get('message')}")
+        return response.get("data") or {}
 
 
 # --------------------------------------------------------------------------
@@ -698,6 +751,134 @@ def fetch_logs(cfg: Config, ql: QinglongClient, store: Store, limit: int = 3) ->
     rows, note = parse_pause_logs(payload, limit=limit)
     store.add_event("logs_query", "成功" if rows else "无记录", f"{len(rows)} 条")
     return True, format_pause_logs(cfg, rows, note)
+
+
+def query_pause_state(cfg: Config, ql: QinglongClient) -> dict:
+    """查询当前是否处于暂停状态（直接问官网，不做本地推断）。"""
+    token = get_token(cfg, ql)
+    if not token:
+        return {"state": "unknown", "reason": "未配置 Token", "checked_at": fmt_ts(cfg)}
+    try:
+        info = LeigodClient(token, timeout=cfg.http_timeout).user_info()
+    except LeigodError as exc:
+        return {"state": "unknown", "reason": str(exc), "checked_at": fmt_ts(cfg)}
+
+    pid = str(info.get("pause_status_id", ""))
+    if pid == "1":
+        state = "paused"
+    elif pid == "0":
+        state = "running"
+    else:
+        state = "unknown"
+
+    extra = {}
+    for key in ("surplus_time", "surplus_time_str", "expire_time", "nickname", "mobile"):
+        if info.get(key) not in (None, "", 0, "0"):
+            extra[key] = info[key]
+
+    return {
+        "state": state,
+        "pause_status_id": pid,
+        "checked_at": fmt_ts(cfg),
+        "extra": extra,
+        "raw_keys": sorted(info.keys()),
+    }
+
+
+_CRON_PRESETS = [
+    ("每 6 小时", "0 */6 * * *"),
+    ("每天 03:00", "0 3 * * *"),
+    ("工作日 03:00", "0 3 * * 1-5"),
+    ("休息日 03:00", "0 3 * * 6,0"),
+    ("工作日 00:00 与 12:00", "0 0,12 * * 1-5"),
+    ("每 2 小时（含夜间）", "0 */2 * * *"),
+]
+
+
+def cron_presets() -> list[dict]:
+    return [{"label": label, "cron": cron} for label, cron in _CRON_PRESETS]
+
+
+def parse_cron(expr: str) -> dict:
+    """极简 cron 解析：校验 5 段与数值范围 + 生成中文描述。不追求覆盖全部语法。"""
+    expr = (expr or "").strip()
+    parts = expr.split()
+    if len(parts) != 5:
+        return {"ok": False, "error": "需要 5 段：分 时 日 月 周"}
+    if "?" in expr:
+        return {"ok": False, "error": "不支持 ? ，请用 *"}
+    for index, part in enumerate(parts):
+        if not all(ch.isdigit() or ch in "*/,-" for ch in part):
+            return {"ok": False, "error": f"第 {index + 1} 段含非法字符"}
+
+    limits = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)]
+    names = ["分", "时", "日", "月", "周"]
+    for index, part in enumerate(parts):
+        low, high = limits[index]
+        for token in part.replace("*", "").split(","):
+            for piece in token.split("-"):
+                piece = piece.split("/")[0]
+                if piece.isdigit() and not (low <= int(piece) <= high):
+                    return {
+                        "ok": False,
+                        "error": f"{names[index]}字段超出范围 {low}-{high}：{piece}",
+                    }
+    return {"ok": True, "desc": _describe_cron(parts)}
+
+
+def _describe_cron(parts: list[str]) -> str:
+    minute, hour, dom, month, dow = parts
+    pieces = []
+
+    if minute.startswith("*/"):
+        pieces.append(f"每 {minute[2:]} 分钟")
+    elif minute == "0":
+        pieces.append("整点")
+    elif minute == "*":
+        pieces.append("每分钟")
+    else:
+        pieces.append(f"第 {minute} 分")
+
+    if hour == "*":
+        pieces.append("每小时")
+    elif hour.startswith("*/"):
+        pieces.append(f"每 {hour[2:]} 小时")
+    else:
+        hours = [h.strip() for h in hour.split(",") if h.strip()]
+        if all(h.isdigit() for h in hours):
+            pieces.append("在 " + "、".join(f"{int(h):02d}:00" for h in hours))
+        else:
+            pieces.append(f"时={hour}")
+
+    if month != "*":
+        pieces.append(f"月={month}")
+
+    if dom != "*":
+        pieces.append(f"每月 {dom} 日")
+
+    if dow != "*":
+        names = {"0": "周日", "1": "周一", "2": "周二", "3": "周三", "4": "周四",
+                 "5": "周五", "6": "周六", "7": "周日"}
+        if dow in ("1-5", "1,2,3,4,5"):
+            pieces.append("仅工作日")
+        elif dow in ("6,0", "0,6", "6,7", "7,6", "5,6", "sat,sun"):
+            pieces.append("仅休息日")
+        else:
+            tokens = []
+            for token in dow.split(","):
+                if "-" in token:
+                    start, _, end = token.partition("-")
+                    if start.isdigit() and end.isdigit():
+                        tokens.append(f"{names.get(start, start)}~{names.get(end, end)}")
+                    else:
+                        tokens.append(token)
+                else:
+                    tokens.append(names.get(token.strip(), token))
+            pieces.append("周=" + "、".join(tokens))
+    else:
+        pieces.append("每天")
+
+    return "，".join(pieces)
 
 
 def build_status(cfg: Config, ql: QinglongClient, store: Store) -> str:

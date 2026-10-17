@@ -1,9 +1,10 @@
 import json
+import os
 import shutil
 import time
 
 CFG = "/AstrBot/data/cmd_config.json"
-OPENID = "240D98E4641A656E85DCBF578A1AAC96"
+OPENID = os.environ.get("QQ_OPENID", "")
 
 backup = CFG + ".bak." + time.strftime("%Y%m%d-%H%M%S")
 shutil.copy2(CFG, backup)

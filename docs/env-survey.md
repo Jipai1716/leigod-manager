@@ -24,7 +24,7 @@ Docker 版本 28.5.2。`jipai` 用户不在 docker 组，所有 docker 操作需
 - 版本 `2.21.0-16`，容器内 Python `3.11.15`，`requests 2.34.2`，自带 `ql` CLI（`/usr/local/bin/ql`）。
 - 宿主机挂载：`/vol1/1000/Docker/qinglong` → 容器 `/ql/data`。
 - 数据库：`/ql/data/db/database.sqlite`，表含 `Crontabs`、`Envs`、`Apps`、`Logs` 等。
-- 已存在 API 应用：`system`，`client_id = nscTDZhZs5-6`。
+- 已存在 API 应用：`system`，`client_id = <QL_CLIENT_ID>`。
 
 ### 现有定时任务（全部保留，不修改）
 
@@ -124,11 +124,29 @@ this.http.post(e, a)
 第三方实现与官网一致：`localStorage.account_token` 为 JSON，取 `.account_token` 字段；有效期约 7 天。
 本项目 Via 脚本已按此实现，并额外做全量 key 扫描与结构容错。
 
-### 5.5 仍需实测确认的项（需真实 Token）
+### 5.5 实测确认（2026-10-17，有效 Token）
 
-- `/api/user/pause/lists` 响应的**实际字段名**（当前解析器做了容错，但字段未实测）
-- 记录排序方向（代码里本地按时间倒序再取前 3）
-- 单条记录是否包含剩余时长/消耗时长
+`POST /api/user/pause/lists` 的响应结构：
+
+```json
+{
+  "code": 0,
+  "msg": "...",
+  "ts": 1792...,
+  "data": [
+    {"id": 1950995083, "status": 1, "pause_time": "2026-10-17 23:12:38",
+     "resume_time": null, "op_source": 0}
+  ]
+}
+```
+
+- `data` 是**数组**，元素字段：`id` / `status` / `pause_time` / `resume_time` / `op_source`
+- `pause_time`、`resume_time` 是 `"YYYY-MM-DD HH:MM:SS"` 字符串（不是时间戳）
+- `resume_time` 为 `null` 表示尚未恢复
+- 响应自带 `ts`；记录按 `pause_time` 倒序可用，本项目仍本地排序后取前 3
+
+`POST /api/user/info` 里 `pause_status_id`：`1` = 已暂停，`0` = 未暂停；实测同一账号返回的
+`nickname`/`mobile` 已被官网脱敏（如 `156****8959`）。
 
 ## 6. 架构决策（基于上述事实）
 

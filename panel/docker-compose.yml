@@ -1,0 +1,35 @@
+# 雷神管理器面板 —— 可作为 NAS「Docker 应用」导入
+#
+# 用法（在仓库根目录）：
+#   docker compose -f panel/docker-compose.yml up -d --build
+#
+# 必填环境变量放在 .env.panel 里（不要提交到 git）：
+#   LEIGOD_PANEL_PASSWORD=访问密码
+#   LEIGOD_QL_BASE_URL=http://127.0.0.1:5700
+#   LEIGOD_QL_CLIENT_ID=...
+#   LEIGOD_QL_CLIENT_SECRET=...
+#   LEIGOD_TZ=Asia/Shanghai
+
+services:
+  leigod-panel:
+    build:
+      context: ..
+      dockerfile: panel/Dockerfile
+    image: leigod-panel:1.0.0
+    container_name: leigod-panel
+    restart: unless-stopped
+    ports:
+      - "5788:5788"
+    environment:
+      LEIGOD_PANEL_PASSWORD: ${LEIGOD_PANEL_PASSWORD:?必须设置}
+      LEIGOD_QL_BASE_URL: ${LEIGOD_QL_BASE_URL:-http://127.0.0.1:5700}
+      LEIGOD_QL_CLIENT_ID: ${LEIGOD_QL_CLIENT_ID:?必须设置}
+      LEIGOD_QL_CLIENT_SECRET: ${LEIGOD_QL_CLIENT_SECRET:?必须设置}
+      LEIGOD_TOKEN_ENV: ${LEIGOD_TOKEN_ENV:-LEIGOD_TOKEN}
+      LEIGOD_TZ: ${LEIGOD_TZ:-Asia/Shanghai}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5788/healthz',timeout=4).status==200 else 1)"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

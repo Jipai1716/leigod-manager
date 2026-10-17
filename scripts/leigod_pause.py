@@ -6,7 +6,8 @@
   1. 读青龙环境变量里的 Token
   2. 查询是否已暂停；已暂停则不重复调用暂停接口
   3. 未暂停则调用 /api/user/pause，并复查 pause_status_id 后再判定结果
-  4. 记录事件 + 暂停状态，可选推送 QQ
+  4. 记录事件 + 暂停状态
+  5. **仅在失败或结果未知时**推送 QQ（成功不打扰）
 
 退出码：0 = 成功（含“本来就已暂停”），1 = 失败，2 = 未配置 Token
 """
@@ -23,15 +24,16 @@ def main() -> int:
     ql = QinglongClient(cfg.ql_base, cfg.ql_client_id, cfg.ql_client_secret, cfg.http_timeout)
     store = Store(cfg, ql)
 
-    header = f"[{now(cfg).strftime('%Y-%m-%d %H:%M:%S')}] 雷神定时暂停"
     ok, reply = do_pause(cfg, ql, store, trigger="cron")
 
-    print(header)
+    print(f"[{now(cfg).strftime('%Y-%m-%d %H:%M:%S')}] 雷神定时暂停")
     print(reply)
 
-    if "--no-push" not in sys.argv:
+    # 只在失败 / 未知时推送，成功静默
+    if not ok and "--no-push" not in sys.argv:
         try:
-            qq_send(cfg, f"【雷神定时暂停】\n{reply}", markdown=False)
+            qq_send(cfg, f"【雷神暂停失败】\n{reply}", markdown=False)
+            print("已推送失败通知")
         except Exception as exc:  # noqa: BLE001 - 推送失败不影响任务结论
             print(f"QQ 推送失败: {exc}")
 

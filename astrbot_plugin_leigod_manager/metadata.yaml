@@ -1,6 +1,0 @@
-name: astrbot_plugin_leigod_manager
-display_name: 雷神管理器
-desc: 雷神加速器 Token 管理与定时暂停的固定指令入口（/leigod 或 /l），不调用大模型
-version: 1.0.0
-author: Jipai
-repo: https://github.com/Jipai1716/leigod-manager

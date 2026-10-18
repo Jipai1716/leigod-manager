@@ -1,4 +1,4 @@
-# leigod-manager 雷神加速器（Leigod）定时暂停
+# 雷神加速器自动暂停方案
 
 用一个自包含的 Docker Web 面板做控制台，
 借青龙面板存 Token 并跑定时任务，失败时通过 QQ 机器人报警。
